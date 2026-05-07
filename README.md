@@ -17,6 +17,9 @@ This is an incremental refactor foundation, not a full extraction of every subsy
 - Start dev server: npm run dev<br/>**启动开发服务：npm run dev**
 - Build production assets: npm run build<br/>**构建生产产物：npm run build**
 - Preview build locally: npm run preview<br/>**本地预览构建结果：npm run preview**
+## Workflow Docs
+- docs/development-workflow.md: required feature workflow, including commit/push/pages verification after each completed feature.<br/>**docs/development-workflow.md：强制开发工作流，要求每完成一个功能就提交、推送并验证 Pages。**
+- docs/current-handoff-guide.md: current handoff and maintenance guidance for future contributors.<br/>**docs/current-handoff-guide.md：当前接手与维护说明。**
 ## Deployment
 GitHub Pages is deployed through the workflow at .github/workflows/deploy.yml using official Pages actions.<br/>**GitHub Pages 通过 .github/workflows/deploy.yml 使用官方 Pages Actions 自动部署。**
 For repository settings, set Pages Source to GitHub Actions.<br/>**在仓库设置中请将 Pages Source 设置为 GitHub Actions。**

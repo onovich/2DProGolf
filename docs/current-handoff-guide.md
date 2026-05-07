@@ -52,9 +52,10 @@
 
 建议阅读顺序：
 
-1. docs/current-project-status.md：快速理解当前版本现状。
-2. docs/development-backlog.md：理解历史 backlog 和当前优先级如何变化。
-3. docs/rpg-design-plan.md：理解最初的产品设计原则和长期方向。
+1. docs/development-workflow.md：先理解当前仓库的强制开发纪律，尤其是“每完成功能就提交、推送并验证 Pages”。
+2. docs/current-project-status.md：快速理解当前版本现状。
+3. docs/development-backlog.md：理解历史 backlog 和当前优先级如何变化。
+4. docs/rpg-design-plan.md：理解最初的产品设计原则和长期方向。
 
 ### 4.2 再看代码
 
