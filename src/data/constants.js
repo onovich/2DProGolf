@@ -42,11 +42,11 @@ export const COURSE_CONFIG = {
 };
 
 export const TERRAIN = {
-  GREEN: { friction: 0.98, colorBase: [144, 214, 110] },
-  FAIRWAY: { friction: 0.96, colorBase: [93, 179, 83] },
-  ROUGH: { friction: 0.9, colorBase: [61, 133, 53] },
-  BUNKER: { friction: 0.8, colorBase: [235, 218, 150] },
-  WATER: { friction: 0.0, colorBase: [59, 130, 246] },
+  GREEN: { velocityRetention: 0.982, slopeGrip: 0.1, rollingFriction: 0.018, colorBase: [144, 214, 110] },
+  FAIRWAY: { velocityRetention: 0.95, slopeGrip: 0.18, rollingFriction: 0.045, colorBase: [93, 179, 83] },
+  ROUGH: { velocityRetention: 0.88, slopeGrip: 0.28, rollingFriction: 0.08, colorBase: [61, 133, 53] },
+  BUNKER: { velocityRetention: 0.72, slopeGrip: 0.42, rollingFriction: 0.14, colorBase: [235, 218, 150] },
+  WATER: { velocityRetention: 0.0, slopeGrip: 0.0, rollingFriction: 1.0, colorBase: [59, 130, 246] },
 };
 
 export const CLUBS = {

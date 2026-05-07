@@ -1698,12 +1698,11 @@ export function initGame(options = {}) {
   }
 
   function applyGroundForces(terrain, grad) {
-    const slopeMult = ball.club === 'putter' ? 2.4 : CONSTANTS.GRAVITY_SLOPE;
+    const slopeMult = ball.club === 'putter' ? 2.2 : CONSTANTS.GRAVITY_SLOPE;
     const slopeForce = grad.mult(slopeMult);
     const slopeStrength = slopeForce.mag();
-    const surfaceDrag = 1 - terrain.type.friction;
-    const staticGrip = 0.08 + surfaceDrag * 1.8;
-    const rollingResistance = 0.02 + surfaceDrag * 0.45;
+    const staticGrip = terrain.type.slopeGrip;
+    const rollingResistance = terrain.type.rollingFriction;
 
     if (ball.vel.mag() < staticGrip && slopeStrength < staticGrip * 1.15) {
       ball.vel = new Vec2(0, 0);
@@ -1711,7 +1710,7 @@ export function initGame(options = {}) {
     }
 
     const slopeAfterGrip = slopeStrength > 0
-      ? slopeForce.normalize().mult(Math.max(0, slopeStrength - Math.min(staticGrip * 0.55, slopeStrength)))
+      ? slopeForce.normalize().mult(Math.max(0, slopeStrength - Math.min(staticGrip, slopeStrength)))
       : new Vec2(0, 0);
 
     ball.vel = ball.vel.add(slopeAfterGrip);
@@ -1721,7 +1720,7 @@ export function initGame(options = {}) {
       ball.vel = ball.vel.sub(resistance);
     }
 
-    ball.vel = ball.vel.mult(terrain.type.friction);
+    ball.vel = ball.vel.mult(terrain.type.velocityRetention);
   }
 
   function updatePhysics() {
