@@ -1697,6 +1697,33 @@ export function initGame(options = {}) {
     overlay.classList.add('show');
   }
 
+  function applyGroundForces(terrain, grad) {
+    const slopeMult = ball.club === 'putter' ? 2.4 : CONSTANTS.GRAVITY_SLOPE;
+    const slopeForce = grad.mult(slopeMult);
+    const slopeStrength = slopeForce.mag();
+    const surfaceDrag = 1 - terrain.type.friction;
+    const staticGrip = 0.08 + surfaceDrag * 1.8;
+    const rollingResistance = 0.02 + surfaceDrag * 0.45;
+
+    if (ball.vel.mag() < staticGrip && slopeStrength < staticGrip * 1.15) {
+      ball.vel = new Vec2(0, 0);
+      return;
+    }
+
+    const slopeAfterGrip = slopeStrength > 0
+      ? slopeForce.normalize().mult(Math.max(0, slopeStrength - Math.min(staticGrip * 0.55, slopeStrength)))
+      : new Vec2(0, 0);
+
+    ball.vel = ball.vel.add(slopeAfterGrip);
+
+    if (ball.vel.mag() > 0) {
+      const resistance = ball.vel.normalize().mult(Math.min(ball.vel.mag(), rollingResistance));
+      ball.vel = ball.vel.sub(resistance);
+    }
+
+    ball.vel = ball.vel.mult(terrain.type.friction);
+  }
+
   function updatePhysics() {
     if (gameState.status !== 'moving') {
       return;
@@ -1711,7 +1738,7 @@ export function initGame(options = {}) {
       ball.vz -= CONSTANTS.GRAVITY_Z;
 
       if (ball.club !== 'putter') {
-        const windForce = gameState.wind.mult(0.008 * (1 + ball.z * 0.05));
+        const windForce = gameState.wind.mult(0.006 * (1 + ball.z * 0.035));
         ball.vel = ball.vel.add(windForce);
       }
       ball.vel = ball.vel.mult(club.airResist);
@@ -1739,11 +1766,7 @@ export function initGame(options = {}) {
       ball.pos = ball.pos.add(ball.vel);
       const terrain = getTerrainAt(ball.pos.x, ball.pos.y);
 
-      const grad = getGradient(ball.pos.x, ball.pos.y);
-      const slopeMult = ball.club === 'putter' ? 3.0 : CONSTANTS.GRAVITY_SLOPE;
-      const slopeForce = grad.mult(slopeMult);
-      ball.vel = ball.vel.add(slopeForce);
-      ball.vel = ball.vel.mult(terrain.type.friction);
+      applyGroundForces(terrain, getGradient(ball.pos.x, ball.pos.y));
 
       const distToHole = ball.pos.sub(gameState.holePos).mag();
       if (distToHole < CONSTANTS.HOLE_RADIUS && ball.vel.mag() < 6) {

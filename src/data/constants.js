@@ -26,7 +26,7 @@ export const COURSE_CONFIG = {
   },
   WIND: {
     min: 0,
-    max: 10,
+    max: 7,
     mode: 'random',
     jitter: 0.25,
   },
