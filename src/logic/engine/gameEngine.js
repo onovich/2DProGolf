@@ -1,4 +1,17 @@
-import { CLUBS, CONSTANTS, TERRAIN } from '../../data/constants';
+import { CLUBS, CONSTANTS, COURSE_CONFIG, TERRAIN } from '../../data/constants';
+import { CITY_CONTENT } from '../../data/content/city';
+import { COMPETITION_CONTENT } from '../../data/content/competition';
+import { PROLOGUE_EVENTS } from '../../data/content/prologue';
+import { TUTORIAL_HOLES } from '../../data/content/tutorial';
+import { WORLD_MAP_CONTENT } from '../../data/content/worldMap';
+
+const GAME_PHASES = {
+  INTRO: 'intro',
+  PLAYING: 'playing',
+  SUMMARY: 'summary',
+  CITY: 'city',
+  WORLD_MAP: 'world-map',
+};
 
 class Vec2 {
   constructor(x, y) {
@@ -55,12 +68,35 @@ function distPointToSegment(p, v, w) {
   return p.sub(projection).mag();
 }
 
-function createSimplexNoise() {
+function rotateVector(v, angle) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return new Vec2(v.x * cos - v.y * sin, v.x * sin + v.y * cos);
+}
+
+function getRandomInRange(min, max, random = Math.random) {
+  return min + random() * (max - min);
+}
+
+function createSeededRandom(seed) {
+  let state = (seed >>> 0) || 1;
+  return () => {
+    state = (1664525 * state + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function createRandomSeed() {
+  return Math.floor(Math.random() * 4294967296) >>> 0;
+}
+
+function createSimplexNoise(seed = createRandomSeed()) {
   const F2 = 0.5 * (Math.sqrt(3.0) - 1.0);
   const G2 = (3.0 - Math.sqrt(3.0)) / 6.0;
+  const random = createSeededRandom(seed);
   const p = new Uint8Array(256);
   for (let i = 0; i < 256; i += 1) {
-    p[i] = Math.floor(Math.random() * 256);
+    p[i] = Math.floor(random() * 256);
   }
   const perm = new Uint8Array(512);
   const permMod12 = new Uint8Array(512);
@@ -132,9 +168,7 @@ function createSimplexNoise() {
   };
 }
 
-const noise2D = createSimplexNoise();
-
-function fBm(x, y, octaves = 3) {
+function fBm(noise2D, x, y, octaves = 3) {
   let value = 0;
   let amplitude = 1;
   let frequency = 0.003;
@@ -148,11 +182,13 @@ function fBm(x, y, octaves = 3) {
   return value / maxVal;
 }
 
-export function initGame() {
+export function initGame(options = {}) {
+  const autoStart = options.autoStart !== false;
   const gameState = {
     hole: 1,
     strokes: 0,
     par: 4,
+    phase: GAME_PHASES.PLAYING,
     status: 'aiming',
     camera: new Vec2(0, 0),
     wind: new Vec2(0, 0),
@@ -160,6 +196,7 @@ export function initGame() {
     holePos: new Vec2(0, 0),
     bunkers: [],
     baseHoleHeight: 0,
+    courseSeed: createRandomSeed(),
   };
 
   const ball = {
@@ -180,12 +217,930 @@ export function initGame() {
     panStartCamera: new Vec2(0, 0),
   };
 
+  const storyState = {
+    activeEvent: null,
+    index: 0,
+    seenEventIds: new Set(),
+  };
+
+  const summaryState = {
+    visible: false,
+    resultLabel: 'Hole Complete',
+    title: '',
+    speaker: '精灵',
+    text: '',
+    nextObjective: '',
+    reward: '',
+    goals: [],
+    transition: [],
+    nextAction: null,
+    nextActionLabel: '前往下一洞',
+  };
+
+  const cityState = {
+    cityId: null,
+    viewId: 'default',
+    focusedNpcId: null,
+    primaryAction: null,
+    secondaryAction: null,
+  };
+
+  const worldMapState = {
+    mapId: null,
+    selectedNodeId: null,
+    primaryAction: null,
+    secondaryAction: null,
+  };
+
+  const competitionState = {
+    activeCompetitionId: null,
+    currentHoleIndex: 0,
+  };
+
+  const progressionState = {
+    completedCompetitionIds: new Set(),
+    claimedTourPass: false,
+  };
+
+  const holeState = {
+    events: new Set(),
+    usedClubs: new Set(),
+    settledTerrains: new Set(),
+    penalties: 0,
+  };
+
   const particles = [];
+  const lifecycle = {
+    isPaused: false,
+  };
   let cameraFollowBall = true;
+  let noise2D = createSimplexNoise(gameState.courseSeed);
+
+  function normalizeSeed(seed) {
+    if (!Number.isFinite(seed)) {
+      return createRandomSeed();
+    }
+    const normalized = Math.floor(seed) >>> 0;
+    return normalized || 1;
+  }
+
+  function setCourseSeed(seed) {
+    gameState.courseSeed = normalizeSeed(seed);
+    noise2D = createSimplexNoise(gameState.courseSeed);
+  }
+
+  function toPlainVec2(vec) {
+    return { x: vec.x, y: vec.y };
+  }
+
+  function hydrateVec2(value, fallback = new Vec2(0, 0)) {
+    if (!value || !Number.isFinite(value.x) || !Number.isFinite(value.y)) {
+      return new Vec2(fallback.x, fallback.y);
+    }
+    return new Vec2(value.x, value.y);
+  }
+
+  function setPaused(paused) {
+    lifecycle.isPaused = Boolean(paused);
+  }
+
+  function setGamePhase(phase) {
+    gameState.phase = phase;
+    updateGuidePanel();
+    updateSummaryPanel();
+    updateCityPanel();
+    updateWorldMapPanel();
+  }
+
+  function updateGuidePanel() {
+    const panel = document.getElementById('guide-panel');
+    const speaker = document.getElementById('guide-speaker');
+    const text = document.getElementById('guide-text');
+    const progress = document.getElementById('guide-progress');
+
+    if (!storyState.activeEvent) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const currentLine = storyState.activeEvent.lines[storyState.index];
+    speaker.innerText = currentLine.speaker;
+    text.innerText = currentLine.text;
+    progress.innerText = `${storyState.index + 1}/${storyState.activeEvent.lines.length}`;
+    panel.classList.add('visible');
+  }
+
+  function updateSummaryPanel() {
+    const panel = document.getElementById('summary-panel');
+    if (!summaryState.visible) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    document.getElementById('summary-kicker').innerText = summaryState.resultLabel;
+    document.getElementById('summary-title').innerText = summaryState.title;
+    document.getElementById('summary-speaker').innerText = summaryState.speaker;
+    document.getElementById('summary-text').innerText = summaryState.text;
+    document.getElementById('summary-strokes').innerText = gameState.strokes;
+    document.getElementById('summary-par').innerText = gameState.par;
+    document.getElementById('summary-next').innerText = summaryState.nextActionLabel;
+    document.getElementById('summary-objective').innerText = summaryState.nextObjective ? `下一目标：${summaryState.nextObjective}` : '';
+    document.getElementById('summary-reward').innerText = summaryState.reward ? `阶段奖励：${summaryState.reward}` : '';
+
+    const goalsContainer = document.getElementById('summary-goals');
+    goalsContainer.innerHTML = '';
+    summaryState.goals.forEach((goal) => {
+      const goalElement = document.createElement('div');
+      goalElement.className = `summary-goal ${goal.completed ? 'is-complete' : 'is-failed'}`;
+
+      const labelElement = document.createElement('span');
+      labelElement.innerText = goal.label;
+
+      const statusElement = document.createElement('span');
+      statusElement.className = 'summary-goal-status';
+      statusElement.innerText = goal.completed ? '完成' : '未达成';
+
+      goalElement.append(labelElement, statusElement);
+      goalsContainer.append(goalElement);
+    });
+
+    panel.classList.add('visible');
+  }
+
+  function getCurrentTutorialHole() {
+    return TUTORIAL_HOLES[gameState.hole] ?? null;
+  }
+
+  function getCurrentCompetition() {
+    return competitionState.activeCompetitionId ? COMPETITION_CONTENT[competitionState.activeCompetitionId] ?? null : null;
+  }
+
+  function getCompetitionHoleByIndex(index = competitionState.currentHoleIndex) {
+    const competition = getCurrentCompetition();
+    return competition?.holes[index] ?? null;
+  }
+
+  function getCurrentHoleContent() {
+    return getCompetitionHoleByIndex() ?? getCurrentTutorialHole();
+  }
+
+  function getTerrainKey(terrainType) {
+    if (terrainType === TERRAIN.GREEN) {
+      return 'green';
+    }
+    if (terrainType === TERRAIN.FAIRWAY) {
+      return 'fairway';
+    }
+    if (terrainType === TERRAIN.BUNKER) {
+      return 'bunker';
+    }
+    if (terrainType === TERRAIN.WATER) {
+      return 'water';
+    }
+    return 'rough';
+  }
+
+  function getBaseCourseConfig() {
+    const baseDistance = COURSE_CONFIG.HOLE_DISTANCE.base + gameState.hole * COURSE_CONFIG.HOLE_DISTANCE.perHole;
+    return {
+      startX: COURSE_CONFIG.START_X,
+      teeYJitter: COURSE_CONFIG.TEE_Y_JITTER,
+      angleRange: COURSE_CONFIG.ANGLE_RANGE,
+      holeHeightBuffer: COURSE_CONFIG.HOLE_HEIGHT_BUFFER,
+      parThresholds: COURSE_CONFIG.PAR_THRESHOLDS,
+      holeDistance: {
+        min: baseDistance,
+        max: baseDistance + COURSE_CONFIG.HOLE_DISTANCE.variance,
+      },
+      windMin: COURSE_CONFIG.WIND.min,
+      windMax: COURSE_CONFIG.WIND.max,
+      windMode: COURSE_CONFIG.WIND.mode,
+      windJitter: COURSE_CONFIG.WIND.jitter,
+      bunkerCount: COURSE_CONFIG.BUNKER.base + gameState.hole * COURSE_CONFIG.BUNKER.perHole,
+      bunkerOffsetRange: COURSE_CONFIG.BUNKER.offsetRange,
+      bunkerRadius: {
+        min: COURSE_CONFIG.BUNKER.radius.min,
+        max: COURSE_CONFIG.BUNKER.radius.max,
+      },
+    };
+  }
+
+  function getCourseConfig() {
+    const holeCourse = getCurrentHoleContent()?.course ?? {};
+    const baseConfig = getBaseCourseConfig();
+    return {
+      ...baseConfig,
+      ...holeCourse,
+      holeDistance: {
+        ...baseConfig.holeDistance,
+        ...(holeCourse.holeDistance ?? {}),
+      },
+      bunkerRadius: {
+        ...baseConfig.bunkerRadius,
+        ...(holeCourse.bunkerRadius ?? {}),
+      },
+    };
+  }
+
+  function getCoursePar(holeDistance, parThresholds) {
+    if (holeDistance < parThresholds.par3Max) {
+      return 3;
+    }
+    if (holeDistance < parThresholds.par4Max) {
+      return 4;
+    }
+    return 5;
+  }
+
+  function getCourseWind(courseConfig, random = Math.random) {
+    const holeDirection = gameState.holePos.sub(gameState.startPos).normalize();
+    let windDirection;
+
+    switch (courseConfig.windMode) {
+      case 'headwind':
+        windDirection = holeDirection.mult(-1);
+        break;
+      case 'tailwind':
+        windDirection = holeDirection;
+        break;
+      case 'cross-left':
+        windDirection = new Vec2(-holeDirection.y, holeDirection.x);
+        break;
+      case 'cross-right':
+        windDirection = new Vec2(holeDirection.y, -holeDirection.x);
+        break;
+      default:
+        windDirection = new Vec2(random() - 0.5, random() - 0.5).normalize();
+        break;
+    }
+
+    const jitter = courseConfig.windJitter ? getRandomInRange(-courseConfig.windJitter, courseConfig.windJitter, random) : 0;
+    return rotateVector(windDirection, jitter)
+      .normalize()
+      .mult(getRandomInRange(courseConfig.windMin, courseConfig.windMax, random));
+  }
+
+  function resetHoleProgress() {
+    holeState.events.clear();
+    holeState.usedClubs.clear();
+    holeState.settledTerrains.clear();
+    holeState.penalties = 0;
+  }
+
+  function recordHoleEvent(eventName, payload = {}) {
+    holeState.events.add(eventName);
+    if (payload.club) {
+      holeState.usedClubs.add(payload.club);
+    }
+    if (payload.terrainKey) {
+      holeState.settledTerrains.add(payload.terrainKey);
+    }
+  }
+
+  function isGoalComplete(goal) {
+    switch (goal.type) {
+      case 'event':
+        return holeState.events.has(goal.event);
+      case 'penalty-free':
+        return holeState.penalties === 0;
+      case 'max-strokes':
+        return gameState.strokes <= goal.max;
+      case 'distinct-clubs-used':
+        return holeState.usedClubs.size >= goal.target;
+      case 'settle-on-terrain':
+        return holeState.settledTerrains.has(goal.terrain);
+      default:
+        return false;
+    }
+  }
+
+  function getSummaryActionLabel(summary) {
+    if (summary?.nextActionLabel) {
+      if (summary?.nextAction?.type === 'complete-competition') {
+        return '返回巡回航线图';
+      }
+      return summary.nextActionLabel;
+    }
+    if (summary?.transition?.length) {
+      return '继续';
+    }
+    if (TUTORIAL_HOLES[gameState.hole + 1]) {
+      return '继续下一课';
+    }
+    return '前往下一洞';
+  }
+
+  function buildHoleSummary(resultLabel) {
+    const holeContent = getCurrentHoleContent();
+    const holeSummary = holeContent?.summary;
+    const nextAction = holeSummary?.nextAction ?? { type: 'advance-hole' };
+    const isCompetitionWrap = nextAction.type === 'complete-competition';
+    return {
+      resultLabel,
+      title: holeSummary?.title ?? resultLabel,
+      speaker: holeSummary?.speaker ?? '精灵',
+      text: holeSummary?.text ?? `第 ${gameState.hole} 洞完成。你已经开始把这一洞打成一个完整回合，而不是只是一杆一杆往前推。`,
+      nextObjective: isCompetitionWrap ? '返回巡回航线图，查看新解锁的地标与下一站。' : holeSummary?.nextObjective ?? '',
+      reward: holeSummary?.reward ?? '',
+      goals: (holeContent?.goals ?? []).map((goal) => ({
+        label: goal.label,
+        completed: isGoalComplete(goal),
+      })),
+      transition: holeSummary?.transition ?? [],
+      nextAction,
+      nextActionLabel: getSummaryActionLabel(holeSummary),
+    };
+  }
+
+  function getCurrentWorldMap() {
+    return worldMapState.mapId ? WORLD_MAP_CONTENT[worldMapState.mapId] ?? null : null;
+  }
+
+  function getWorldMapPresentation(mapDefinition) {
+    if (!mapDefinition) {
+      return null;
+    }
+
+    let subtitle = mapDefinition.subtitle;
+    let description = mapDefinition.description;
+    let objective = mapDefinition.objective;
+
+    if (mapDefinition.completeWhenCompetitionCompleted && isCompetitionCompleted(mapDefinition.completeWhenCompetitionCompleted)) {
+      subtitle = mapDefinition.completedSubtitle ?? subtitle;
+      description = mapDefinition.completedDescription ?? description;
+      objective = mapDefinition.completedObjective ?? objective;
+    }
+
+    mapDefinition.presentationStages?.forEach((stage) => {
+      if (isCompetitionCompleted(stage.whenCompetitionCompleted)) {
+        subtitle = stage.subtitle ?? subtitle;
+        description = stage.description ?? description;
+        objective = stage.objective ?? objective;
+      }
+    });
+
+    return { subtitle, description, objective };
+  }
+
+  function isCompetitionCompleted(competitionId) {
+    return progressionState.completedCompetitionIds.has(competitionId);
+  }
+
+  function getWorldNodePresentation(node) {
+    let status = node.status;
+    let statusLabel = node.statusLabel ?? '未开放';
+    let description = node.description;
+
+    if (node.completeWhenCompetitionCompleted && isCompetitionCompleted(node.completeWhenCompetitionCompleted)) {
+      status = 'completed';
+      statusLabel = node.completedStatusLabel ?? '已完成';
+      description = node.completedDescription ?? description;
+    } else if (!node.unlockWhenCompetitionCompleted || isCompetitionCompleted(node.unlockWhenCompetitionCompleted)) {
+      status = status === 'locked' ? 'unlocked' : status;
+      statusLabel = node.unlockedStatusLabel ?? statusLabel;
+      description = node.unlockedDescription ?? description;
+    }
+
+    node.presentationStages?.forEach((stage) => {
+      if (isCompetitionCompleted(stage.whenCompetitionCompleted)) {
+        status = stage.status ?? status;
+        statusLabel = stage.statusLabel ?? statusLabel;
+        description = stage.description ?? description;
+      }
+    });
+
+    if (node.cityId === cityState.cityId && status !== 'completed') {
+      status = 'current';
+      statusLabel = node.statusLabel ?? '当前据点';
+      description = node.currentDescription ?? description;
+    }
+
+    return { status, statusLabel, description };
+  }
+
+  function findWorldMapIdForCompetition(competitionId) {
+    return Object.entries(WORLD_MAP_CONTENT).find(([, mapDefinition]) => {
+      if (mapDefinition.completeWhenCompetitionCompleted === competitionId) {
+        return true;
+      }
+      return mapDefinition.nodes.some(
+        (node) => node.completeWhenCompetitionCompleted === competitionId || node.unlockWhenCompetitionCompleted === competitionId,
+      );
+    })?.[0] ?? 'frontier-preview';
+  }
+
+  function findWorldMapNodeAfterCompetition(mapDefinition, competitionId) {
+    const completedNodeIndex = mapDefinition.nodes.findIndex((node) => node.completeWhenCompetitionCompleted === competitionId);
+    if (completedNodeIndex !== -1) {
+      const nextAvailableNode = mapDefinition.nodes
+        .slice(completedNodeIndex + 1)
+        .find((node) => getWorldNodePresentation(node).status !== 'locked');
+
+      if (nextAvailableNode) {
+        return nextAvailableNode.id;
+      }
+    }
+
+    return (
+      mapDefinition.nodes.find((node) => node.unlockWhenCompetitionCompleted === competitionId)
+      ?? mapDefinition.nodes.find((node) => node.completeWhenCompetitionCompleted === competitionId)
+      ?? mapDefinition.nodes.find((node) => getWorldNodePresentation(node).status !== 'locked')
+      ?? mapDefinition.nodes[0]
+    )?.id;
+  }
+
+  function getCurrentCity() {
+    return cityState.cityId ? CITY_CONTENT[cityState.cityId] : null;
+  }
+
+  function getCurrentCityView() {
+    const city = getCurrentCity();
+    return city?.views?.[cityState.viewId] ?? null;
+  }
+
+  function getNpcRecord(city, npcId) {
+    return city?.npcs.find((npc) => npc.id === npcId) ?? null;
+  }
+
+  function getNpcDialogue(city, cityView, npcId) {
+    return cityView?.npcDialogue?.[npcId] ?? getNpcRecord(city, npcId)?.dialogue ?? [];
+  }
+
+  function focusCityNpc(npcId) {
+    cityState.focusedNpcId = npcId;
+    updateCityPanel();
+  }
+
+  function updateCityPanel() {
+    const panel = document.getElementById('city-panel');
+    if (gameState.phase !== GAME_PHASES.CITY || !cityState.cityId) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const city = getCurrentCity();
+    const cityView = getCurrentCityView();
+    if (!city || !cityView) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const focusedNpc = getNpcRecord(city, cityState.focusedNpcId ?? city.npcs[0]?.id);
+    const focusedDialogue = focusedNpc ? getNpcDialogue(city, cityView, focusedNpc.id) : [];
+
+    cityState.primaryAction = cityView.primaryAction ?? null;
+    cityState.secondaryAction = cityView.secondaryAction ?? null;
+
+    document.getElementById('city-title').innerText = city.title;
+    document.getElementById('city-subtitle').innerText = city.subtitle;
+    document.getElementById('city-description').innerText = cityView.description;
+    document.getElementById('city-objective').innerText = cityView.objective;
+    document.getElementById('city-progress').innerText = cityView.progressSummary ?? city.progressSummary ?? '';
+    document.getElementById('city-focus-name').innerText = focusedNpc?.name ?? '';
+    document.getElementById('city-focus-role').innerText = focusedNpc?.role ?? '';
+    document.getElementById('city-focus-summary').innerText = focusedNpc?.summary ?? '';
+    document.getElementById('city-focus-dialogue').innerText = focusedDialogue[0] ?? '';
+
+    const npcList = document.getElementById('city-npc-list');
+    npcList.innerHTML = '';
+    city.npcs.forEach((npc) => {
+      const npcButton = document.createElement('button');
+      npcButton.type = 'button';
+      npcButton.className = `city-npc-chip ${npc.id === focusedNpc?.id ? 'is-active' : ''}`;
+      npcButton.dataset.npcId = npc.id;
+      npcButton.innerText = npc.name;
+      npcList.append(npcButton);
+    });
+
+    const primaryButton = document.getElementById('city-primary-action');
+    primaryButton.innerText = cityState.primaryAction?.label ?? '继续';
+    primaryButton.style.display = cityState.primaryAction ? 'inline-flex' : 'none';
+
+    const secondaryButton = document.getElementById('city-secondary-action');
+    secondaryButton.innerText = cityState.secondaryAction?.label ?? '查看角色';
+    secondaryButton.style.display = cityState.secondaryAction ? 'inline-flex' : 'none';
+
+    panel.classList.add('visible');
+  }
+
+  function selectWorldMapNode(nodeId) {
+    worldMapState.selectedNodeId = nodeId;
+    updateWorldMapPanel();
+  }
+
+  function updateWorldMapPanel() {
+    const panel = document.getElementById('world-map-panel');
+    if (gameState.phase !== GAME_PHASES.WORLD_MAP || !worldMapState.mapId) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const mapDefinition = getCurrentWorldMap();
+    if (!mapDefinition) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const selectedNode = mapDefinition.nodes.find((node) => node.id === worldMapState.selectedNodeId) ?? mapDefinition.nodes[0];
+    const presentation = selectedNode ? getWorldNodePresentation(selectedNode) : null;
+    const mapPresentation = getWorldMapPresentation(mapDefinition);
+
+    document.getElementById('world-map-title').innerText = mapDefinition.title;
+    document.getElementById('world-map-subtitle').innerText = mapPresentation?.subtitle ?? mapDefinition.subtitle;
+    document.getElementById('world-map-description').innerText = mapPresentation?.description ?? mapDefinition.description;
+    document.getElementById('world-map-objective').innerText = mapPresentation?.objective ?? mapDefinition.objective;
+    document.getElementById('world-map-focus-name').innerText = selectedNode?.name ?? '';
+    document.getElementById('world-map-focus-status').innerText = presentation?.statusLabel ?? '';
+    document.getElementById('world-map-focus-description').innerText = presentation?.description ?? '';
+
+    const regionLayer = document.getElementById('world-map-region-layer');
+    regionLayer.innerHTML = '';
+    mapDefinition.visualRegions?.forEach((region) => {
+      const regionElement = document.createElement('div');
+      regionElement.className = `world-map-region world-map-region-tone-${region.tone}`;
+      regionElement.style.left = `${region.x}%`;
+      regionElement.style.top = `${region.y}%`;
+      regionElement.style.width = `${region.width}%`;
+      regionElement.style.height = `${region.height}%`;
+
+      const labelElement = document.createElement('div');
+      labelElement.className = 'world-map-region-label';
+      labelElement.innerText = `${region.title}\n${region.subtitle}`;
+      regionElement.append(labelElement);
+      regionLayer.append(regionElement);
+    });
+
+    const routeLayer = document.getElementById('world-map-route-layer');
+    routeLayer.innerHTML = '';
+    for (let index = 0; index < mapDefinition.nodes.length - 1; index += 1) {
+      const fromNode = mapDefinition.nodes[index];
+      const toNode = mapDefinition.nodes[index + 1];
+      if (!fromNode.visual?.position || !toNode.visual?.position) {
+        continue;
+      }
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', `M ${fromNode.visual.position.x} ${fromNode.visual.position.y} L ${toNode.visual.position.x} ${toNode.visual.position.y}`);
+      routeLayer.append(path);
+    }
+
+    const landmarkLayer = document.getElementById('world-map-landmark-layer');
+    landmarkLayer.innerHTML = '';
+    mapDefinition.nodes.forEach((node) => {
+      const nodePresentation = getWorldNodePresentation(node);
+      const landmark = document.createElement('button');
+      landmark.type = 'button';
+      landmark.dataset.nodeId = node.id;
+      landmark.className = `world-map-landmark ${node.id === selectedNode?.id ? 'is-active' : ''} ${nodePresentation.status === 'locked' ? 'is-locked' : ''} ${nodePresentation.status === 'current' ? 'is-current' : ''} ${nodePresentation.status === 'completed' ? 'is-completed' : ''}`;
+      landmark.style.left = `${node.visual?.position?.x ?? 0}%`;
+      landmark.style.top = `${node.visual?.position?.y ?? 0}%`;
+
+      const dot = document.createElement('span');
+      dot.className = 'world-map-landmark-dot';
+
+      const label = document.createElement('span');
+      label.className = 'world-map-landmark-label';
+      label.innerText = node.name;
+
+      const tags = document.createElement('div');
+      tags.className = 'world-map-landmark-tags';
+      node.visual?.markers?.slice(0, 2).forEach((marker) => {
+        const tag = document.createElement('span');
+        tag.className = 'world-map-landmark-tag';
+        tag.innerText = marker.label;
+        tags.append(tag);
+      });
+
+      landmark.append(dot, label, tags);
+      landmarkLayer.append(landmark);
+    });
+
+    const nodeList = document.getElementById('world-map-node-list');
+    nodeList.innerHTML = '';
+    mapDefinition.nodes.forEach((node) => {
+      const nodePresentation = getWorldNodePresentation(node);
+      const nodeButton = document.createElement('button');
+      nodeButton.type = 'button';
+      nodeButton.dataset.nodeId = node.id;
+      nodeButton.className = `world-map-node-chip ${node.id === selectedNode?.id ? 'is-active' : ''} ${nodePresentation.status === 'locked' ? 'is-locked' : ''}`;
+      nodeButton.innerText = `${node.name} · ${nodePresentation.statusLabel}`;
+      nodeList.append(nodeButton);
+    });
+
+    worldMapState.primaryAction = selectedNode?.primaryAction ?? mapDefinition.primaryAction ?? null;
+    worldMapState.secondaryAction = selectedNode?.secondaryAction ?? mapDefinition.secondaryAction ?? null;
+
+    const primaryButton = document.getElementById('world-map-primary-action');
+    primaryButton.innerText = worldMapState.primaryAction?.label ?? '继续';
+    primaryButton.style.display = worldMapState.primaryAction ? 'inline-flex' : 'none';
+    primaryButton.disabled = presentation?.status === 'locked';
+
+    const secondaryButton = document.getElementById('world-map-secondary-action');
+    secondaryButton.innerText = worldMapState.secondaryAction?.label ?? '查看据点';
+    secondaryButton.style.display = worldMapState.secondaryAction ? 'inline-flex' : 'none';
+
+    panel.classList.add('visible');
+  }
+
+  function resolveCityView(cityId, requestedView = 'default') {
+    if (requestedView !== 'default') {
+      return requestedView;
+    }
+
+    const completedCompetitionEntry = Object.entries(COMPETITION_CONTENT).find(
+      ([competitionId, competition]) => competition.cityId === cityId && progressionState.completedCompetitionIds.has(competitionId),
+    );
+
+    if (!completedCompetitionEntry) {
+      return 'default';
+    }
+
+    if (cityId === 'misty-range-town' && progressionState.claimedTourPass && CITY_CONTENT[cityId]?.views?.['pass-issued']) {
+      return 'pass-issued';
+    }
+
+    return completedCompetitionEntry[1].completionCityView ?? 'default';
+  }
+
+  function enterCity(cityId, viewId = 'default') {
+    const city = CITY_CONTENT[cityId];
+    if (!city) {
+      return;
+    }
+
+    const preferredViewId = resolveCityView(cityId, viewId);
+    const resolvedViewId = city.views?.[preferredViewId] ? preferredViewId : 'default';
+    const cityView = city.views?.[resolvedViewId] ?? null;
+    cityState.cityId = cityId;
+    cityState.viewId = resolvedViewId;
+    cityState.focusedNpcId = cityView?.secondaryAction?.npcId ?? city.npcs[0]?.id ?? null;
+    setGamePhase(GAME_PHASES.CITY);
+    updateCityPanel();
+  }
+
+  function openWorldMap(mapId, selectedNodeId = null) {
+    const mapDefinition = WORLD_MAP_CONTENT[mapId];
+    if (!mapDefinition) {
+      return;
+    }
+
+    worldMapState.mapId = mapId;
+    worldMapState.selectedNodeId = selectedNodeId ?? mapDefinition.nodes[0]?.id ?? null;
+    worldMapState.primaryAction = null;
+    worldMapState.secondaryAction = null;
+    setGamePhase(GAME_PHASES.WORLD_MAP);
+    updateWorldMapPanel();
+  }
+
+  function startCompetition(competitionId) {
+    const competition = COMPETITION_CONTENT[competitionId];
+    if (!competition) {
+      return;
+    }
+
+    competitionState.activeCompetitionId = competitionId;
+    competitionState.currentHoleIndex = 0;
+    const firstHole = competition.holes[0];
+    gameState.hole = firstHole?.hole ?? competition.startHole;
+    showMessage(competition.title);
+    setGamePhase(GAME_PHASES.PLAYING);
+    generateCourse();
+  }
+
+  function advanceCompetitionHole() {
+    const competition = getCurrentCompetition();
+    if (!competition) {
+      return;
+    }
+
+    const nextIndex = competitionState.currentHoleIndex + 1;
+    const nextHole = competition.holes[nextIndex];
+    if (!nextHole) {
+      return;
+    }
+
+    competitionState.currentHoleIndex = nextIndex;
+    gameState.hole = nextHole.hole;
+    setGamePhase(GAME_PHASES.PLAYING);
+    generateCourse();
+  }
+
+  function completeCompetition(competitionId) {
+    const competition = COMPETITION_CONTENT[competitionId];
+    if (!competition) {
+      return;
+    }
+
+    progressionState.completedCompetitionIds.add(competitionId);
+    competitionState.activeCompetitionId = null;
+    competitionState.currentHoleIndex = 0;
+    const mapId = competition.nextMapId ?? findWorldMapIdForCompetition(competitionId);
+    const mapDefinition = WORLD_MAP_CONTENT[mapId];
+    const selectedNodeId = competition.nextMapNodeId ?? (mapDefinition ? findWorldMapNodeAfterCompetition(mapDefinition, competitionId) : null);
+    showMessage('新地标已解锁');
+    openWorldMap(mapId, selectedNodeId);
+    if (selectedNodeId) {
+      selectWorldMapNode(selectedNodeId);
+    }
+  }
+
+  function runFlowAction(action) {
+    if (!action) {
+      return;
+    }
+
+    if (action.type === 'set-phase') {
+      setGamePhase(action.phase);
+      return;
+    }
+
+    if (action.type === 'advance-hole') {
+      summaryState.visible = false;
+      updateSummaryPanel();
+      setGamePhase(GAME_PHASES.PLAYING);
+      gameState.hole += 1;
+      generateCourse();
+      return;
+    }
+
+    if (action.type === 'enter-city') {
+      enterCity(action.cityId, action.viewId ?? action.view ?? 'default');
+      return;
+    }
+
+    if (action.type === 'open-world-map') {
+      openWorldMap(action.mapId, action.selectedNodeId ?? action.nodeId ?? null);
+      return;
+    }
+
+    if (action.type === 'start-competition') {
+      startCompetition(action.competitionId);
+      return;
+    }
+
+    if (action.type === 'next-hole') {
+      advanceCompetitionHole();
+      return;
+    }
+
+    if (action.type === 'complete-competition') {
+      completeCompetition(action.competitionId);
+      return;
+    }
+
+    if (action.type === 'claim-tour-pass') {
+      progressionState.claimedTourPass = true;
+      enterCity(cityState.cityId, action.nextView ?? cityState.viewId);
+      if (action.focusNpcId) {
+        focusCityNpc(action.focusNpcId);
+      }
+      return;
+    }
+
+    if (action.type === 'focus-npc') {
+      focusCityNpc(action.npcId);
+      return;
+    }
+  }
+
+  function getStoryEventSources() {
+    return [...PROLOGUE_EVENTS, ...(getCurrentHoleContent()?.storyEvents ?? [])];
+  }
+
+  function continueFromSummary() {
+    const nextAction = summaryState.nextAction ?? { type: 'advance-hole' };
+    const transitionLines = summaryState.transition ?? [];
+
+    summaryState.visible = false;
+    updateSummaryPanel();
+
+    if (transitionLines.length > 0) {
+      startStoryEvent({
+        id: `summary-transition-${gameState.hole}`,
+        phase: GAME_PHASES.INTRO,
+        lines: transitionLines,
+        onComplete: nextAction,
+      });
+      return;
+    }
+
+    runFlowAction(nextAction);
+  }
+
+  function findStoryEvent(trigger) {
+    return getStoryEventSources().find((event) => {
+      if (event.trigger !== trigger) {
+        return false;
+      }
+      if (typeof event.hole === 'number' && event.hole !== gameState.hole) {
+        return false;
+      }
+      if (event.once && storyState.seenEventIds.has(event.id)) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  function completeStoryEvent() {
+    if (!storyState.activeEvent) {
+      return;
+    }
+
+    const completedEvent = storyState.activeEvent;
+    storyState.seenEventIds.add(completedEvent.id);
+    storyState.activeEvent = null;
+    storyState.index = 0;
+    updateGuidePanel();
+    runFlowAction(completedEvent.onComplete);
+    if (!completedEvent.onComplete) {
+      setGamePhase(GAME_PHASES.PLAYING);
+    }
+  }
+
+  function startStoryEvent(event) {
+    storyState.activeEvent = event;
+    storyState.index = 0;
+    setGamePhase(event.phase ?? GAME_PHASES.INTRO);
+  }
+
+  function advanceStoryEvent() {
+    if (!storyState.activeEvent) {
+      return;
+    }
+
+    if (storyState.index >= storyState.activeEvent.lines.length - 1) {
+      completeStoryEvent();
+      return;
+    }
+
+    storyState.index += 1;
+    updateGuidePanel();
+  }
+
+  function triggerStoryEvent(trigger) {
+    const event = findStoryEvent(trigger);
+    if (!event) {
+      return false;
+    }
+    startStoryEvent(event);
+    return true;
+  }
+
+  function resetBallToSafePosition() {
+    ball.pos = new Vec2(ball.lastSafePos.x, ball.lastSafePos.y);
+    ball.vel = new Vec2(0, 0);
+    ball.z = 0;
+    ball.vz = 0;
+    gameState.status = 'aiming';
+    setGamePhase(GAME_PHASES.PLAYING);
+    updateUI();
+  }
+
+  function recoverFromPenalty(message) {
+    gameState.status = 'penalty';
+    holeState.penalties += 1;
+    showMessage(message);
+    gameState.strokes += 1;
+    updateUI();
+    setTimeout(resetBallToSafePosition, 2000);
+  }
+
+  function getHoleResultLabel() {
+    const score = gameState.strokes - gameState.par;
+    if (gameState.strokes === 1) {
+      return 'Hole in One!';
+    }
+    if (score <= -3) {
+      return 'Albatross';
+    }
+    if (score === -2) {
+      return 'Eagle';
+    }
+    if (score === -1) {
+      return 'Birdie';
+    }
+    if (score === 0) {
+      return 'Par';
+    }
+    if (score === 1) {
+      return 'Bogey';
+    }
+    return `+${score}`;
+  }
+
+  function finishHole() {
+    const result = getHoleResultLabel();
+    Object.assign(summaryState, buildHoleSummary(result), { visible: true });
+    gameState.status = 'holed';
+    setGamePhase(GAME_PHASES.SUMMARY);
+    updateSummaryPanel();
+    showMessage(result);
+  }
 
   function getTerrainAt(x, y) {
     const p = new Vec2(x, y);
-    const baseHeight = (fBm(x, y) + 1) * 0.5 * 100;
+    const baseHeight = (fBm(noise2D, x, y) + 1) * 0.5 * 100;
 
     const edgeNoise = noise2D(x * 0.02, y * 0.02) * 15;
     const distHole = p.sub(gameState.holePos).mag() + edgeNoise;
@@ -254,33 +1209,54 @@ export function initGame() {
   });
   window.dispatchEvent(new Event('resize'));
 
-  async function generateCourse() {
-    document.getElementById('loading').style.opacity = 1;
-    document.getElementById('loading').style.pointerEvents = 'auto';
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  function setSelectedClub(clubType) {
+    ball.club = clubType;
+    document.querySelectorAll('.club-btn').forEach((button) => {
+      button.classList.toggle('active', button.dataset.club === clubType);
+    });
+  }
 
-    gameState.startPos = new Vec2(300, CONSTANTS.MAP_HEIGHT / 2 + (Math.random() - 0.5) * 600);
+  function seedCourseLayout(courseSeed) {
+    setCourseSeed(courseSeed);
+    const random = createSeededRandom(gameState.courseSeed ^ 0x9e3779b9);
+    const courseConfig = getCourseConfig();
 
-    const holeDistance = 900 + gameState.hole * 150 + Math.random() * 300;
-    gameState.par = holeDistance < 1300 ? 3 : holeDistance < 1900 ? 4 : 5;
+    gameState.startPos = new Vec2(courseConfig.startX, CONSTANTS.MAP_HEIGHT / 2 + (random() - 0.5) * courseConfig.teeYJitter);
 
-    const angle = (Math.random() - 0.5) * Math.PI * 0.3;
+    const holeDistance = getRandomInRange(courseConfig.holeDistance.min, courseConfig.holeDistance.max, random);
+    gameState.par = getCoursePar(holeDistance, courseConfig.parThresholds);
+
+    const angle = getRandomInRange(-courseConfig.angleRange, courseConfig.angleRange, random);
     gameState.holePos = new Vec2(
       gameState.startPos.x + Math.cos(angle) * holeDistance,
       gameState.startPos.y + Math.sin(angle) * holeDistance,
     );
 
-    gameState.baseHoleHeight = Math.max(CONSTANTS.WATER_LEVEL + 10, (fBm(gameState.holePos.x, gameState.holePos.y) + 1) * 0.5 * 100);
-    gameState.wind = new Vec2(Math.random() - 0.5, Math.random() - 0.5).normalize().mult(Math.random() * 10);
+    gameState.baseHoleHeight = Math.max(
+      CONSTANTS.WATER_LEVEL + courseConfig.holeHeightBuffer,
+      (fBm(noise2D, gameState.holePos.x, gameState.holePos.y) + 1) * 0.5 * 100,
+    );
+    gameState.wind = getCourseWind(courseConfig, random);
 
     gameState.bunkers = [];
-    const numHazards = 8 + gameState.hole * 2;
+    const numHazards = courseConfig.bunkerCount;
     for (let i = 0; i < numHazards; i += 1) {
-      const t = 0.2 + Math.random() * 0.7;
+      const t = 0.2 + random() * 0.7;
       const basePos = gameState.startPos.lerp(gameState.holePos, t);
-      const offset = new Vec2((Math.random() - 0.5) * 400, (Math.random() - 0.5) * 400);
-      gameState.bunkers.push({ pos: basePos.add(offset), r: 25 + Math.random() * 40 });
+      const offset = new Vec2((random() - 0.5) * courseConfig.bunkerOffsetRange, (random() - 0.5) * courseConfig.bunkerOffsetRange);
+      gameState.bunkers.push({
+        pos: basePos.add(offset),
+        r: getRandomInRange(courseConfig.bunkerRadius.min, courseConfig.bunkerRadius.max, random),
+      });
     }
+  }
+
+  async function renderCoursePresentation(options = {}) {
+    const triggerHoleStart = options.triggerHoleStart !== false;
+
+    document.getElementById('loading').style.opacity = 1;
+    document.getElementById('loading').style.pointerEvents = 'auto';
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     bgCanvas.width = CONSTANTS.MAP_WIDTH;
     bgCanvas.height = CONSTANTS.MAP_HEIGHT;
@@ -329,6 +1305,26 @@ export function initGame() {
     bgCtx.lineTo(gameState.holePos.x + 2, gameState.holePos.y - 25);
     bgCtx.fill();
 
+    updateUI();
+    updateGuidePanel();
+    updateSummaryPanel();
+    updateCityPanel();
+    updateWorldMapPanel();
+
+    setTimeout(() => {
+      document.getElementById('loading').style.opacity = 0;
+      if (triggerHoleStart && !triggerStoryEvent('hole-start')) {
+        setGamePhase(GAME_PHASES.PLAYING);
+      }
+      setTimeout(() => {
+        document.getElementById('loading').style.pointerEvents = 'none';
+      }, 500);
+    }, 300);
+  }
+
+  async function generateCourse(courseSeed = createRandomSeed()) {
+    seedCourseLayout(courseSeed);
+
     ball.pos = new Vec2(gameState.startPos.x, gameState.startPos.y);
     ball.vel = new Vec2(0, 0);
     ball.z = 0;
@@ -336,19 +1332,191 @@ export function initGame() {
     ball.lastSafePos = new Vec2(ball.pos.x, ball.pos.y);
     gameState.strokes = 0;
     gameState.status = 'aiming';
+    resetHoleProgress();
+    summaryState.visible = false;
+    summaryState.resultLabel = 'Hole Complete';
+    summaryState.title = '';
+    summaryState.speaker = '精灵';
+    summaryState.text = '';
+    summaryState.nextObjective = '';
+    summaryState.reward = '';
+    summaryState.goals = [];
+    summaryState.transition = [];
+    summaryState.nextAction = null;
+    summaryState.nextActionLabel = '前往下一洞';
     cameraFollowBall = true;
 
     gameState.camera.x = ball.pos.x - fgCanvas.width / 2;
     gameState.camera.y = ball.pos.y - fgCanvas.height / 2;
+    setSelectedClub('iron');
+    await renderCoursePresentation({ triggerHoleStart: true });
+  }
 
-    updateUI();
+  async function restoreGame(snapshot) {
+    if (!snapshot || !snapshot.gameState || !snapshot.ball) {
+      throw new Error('Invalid save data');
+    }
 
-    setTimeout(() => {
-      document.getElementById('loading').style.opacity = 0;
-      setTimeout(() => {
-        document.getElementById('loading').style.pointerEvents = 'none';
-      }, 500);
-    }, 300);
+    gameState.hole = snapshot.gameState.hole ?? 1;
+    gameState.strokes = snapshot.gameState.strokes ?? 0;
+    gameState.par = snapshot.gameState.par ?? 4;
+    gameState.phase = snapshot.gameState.phase ?? GAME_PHASES.PLAYING;
+    gameState.status = snapshot.gameState.status ?? 'aiming';
+    gameState.camera = hydrateVec2(snapshot.gameState.camera);
+    gameState.wind = hydrateVec2(snapshot.gameState.wind);
+    gameState.startPos = hydrateVec2(snapshot.gameState.startPos);
+    gameState.holePos = hydrateVec2(snapshot.gameState.holePos);
+    gameState.bunkers = Array.isArray(snapshot.gameState.bunkers)
+      ? snapshot.gameState.bunkers.map((bunker) => ({ pos: hydrateVec2(bunker.pos), r: bunker.r ?? 30 }))
+      : [];
+    gameState.baseHoleHeight = snapshot.gameState.baseHoleHeight ?? 0;
+    setCourseSeed(snapshot.gameState.courseSeed);
+
+    ball.pos = hydrateVec2(snapshot.ball.pos);
+    ball.vel = hydrateVec2(snapshot.ball.vel);
+    ball.z = snapshot.ball.z ?? 0;
+    ball.vz = snapshot.ball.vz ?? 0;
+    ball.lastSafePos = hydrateVec2(snapshot.ball.lastSafePos, ball.pos);
+
+    competitionState.activeCompetitionId = snapshot.competitionState?.activeCompetitionId ?? null;
+    competitionState.currentHoleIndex = snapshot.competitionState?.currentHoleIndex ?? 0;
+    progressionState.completedCompetitionIds = new Set(snapshot.progressionState?.completedCompetitionIds ?? []);
+    progressionState.claimedTourPass = Boolean(snapshot.progressionState?.claimedTourPass);
+
+    storyState.index = snapshot.storyState?.index ?? 0;
+    storyState.seenEventIds = new Set(snapshot.storyState?.seenEventIds ?? []);
+    storyState.activeEvent = (snapshot.storyState?.activeEventId
+      ? getStoryEventSources().find((event) => event.id === snapshot.storyState.activeEventId)
+      : null) ?? null;
+
+    cityState.cityId = snapshot.cityState?.cityId ?? null;
+    cityState.viewId = snapshot.cityState?.viewId ?? 'default';
+    cityState.focusedNpcId = snapshot.cityState?.focusedNpcId ?? null;
+    cityState.primaryAction = snapshot.cityState?.primaryAction ?? null;
+    cityState.secondaryAction = snapshot.cityState?.secondaryAction ?? null;
+
+    worldMapState.mapId = snapshot.worldMapState?.mapId ?? null;
+    worldMapState.selectedNodeId = snapshot.worldMapState?.selectedNodeId ?? null;
+    worldMapState.primaryAction = snapshot.worldMapState?.primaryAction ?? null;
+    worldMapState.secondaryAction = snapshot.worldMapState?.secondaryAction ?? null;
+    resetHoleProgress();
+
+    summaryState.visible = Boolean(snapshot.summaryState?.visible);
+    summaryState.resultLabel = snapshot.summaryState?.resultLabel ?? 'Hole Complete';
+    summaryState.title = snapshot.summaryState?.title ?? '';
+    summaryState.speaker = snapshot.summaryState?.speaker ?? '精灵';
+    summaryState.text = snapshot.summaryState?.text ?? '';
+    summaryState.nextObjective = snapshot.summaryState?.nextObjective ?? '';
+    summaryState.reward = snapshot.summaryState?.reward ?? '';
+    summaryState.goals = snapshot.summaryState?.goals ?? [];
+    summaryState.transition = snapshot.summaryState?.transition ?? [];
+    summaryState.nextAction = snapshot.summaryState?.nextAction ?? null;
+    summaryState.nextActionLabel = snapshot.summaryState?.nextActionLabel ?? '前往下一洞';
+    cameraFollowBall = snapshot.cameraFollowBall !== false;
+
+    setSelectedClub(snapshot.ball.club ?? 'iron');
+    await renderCoursePresentation({ triggerHoleStart: false });
+  }
+
+  async function startNewGame() {
+    gameState.hole = 1;
+    storyState.activeEvent = null;
+    storyState.index = 0;
+    storyState.seenEventIds = new Set();
+    competitionState.activeCompetitionId = null;
+    competitionState.currentHoleIndex = 0;
+    progressionState.completedCompetitionIds = new Set();
+    progressionState.claimedTourPass = false;
+    cityState.cityId = null;
+    cityState.viewId = 'default';
+    cityState.focusedNpcId = null;
+    cityState.primaryAction = null;
+    cityState.secondaryAction = null;
+    worldMapState.mapId = null;
+    worldMapState.selectedNodeId = null;
+    worldMapState.primaryAction = null;
+    worldMapState.secondaryAction = null;
+    summaryState.visible = false;
+    summaryState.resultLabel = 'Hole Complete';
+    summaryState.title = '';
+    summaryState.speaker = '精灵';
+    summaryState.text = '';
+    summaryState.nextObjective = '';
+    summaryState.reward = '';
+    summaryState.goals = [];
+    summaryState.transition = [];
+    summaryState.nextAction = null;
+    summaryState.nextActionLabel = '前往下一洞';
+    resetHoleProgress();
+    await generateCourse();
+  }
+
+  function saveState() {
+    return {
+      version: 1,
+      gameState: {
+        hole: gameState.hole,
+        strokes: gameState.strokes,
+        par: gameState.par,
+        phase: gameState.phase,
+        status: gameState.status,
+        camera: toPlainVec2(gameState.camera),
+        wind: toPlainVec2(gameState.wind),
+        startPos: toPlainVec2(gameState.startPos),
+        holePos: toPlainVec2(gameState.holePos),
+        bunkers: gameState.bunkers.map((bunker) => ({ pos: toPlainVec2(bunker.pos), r: bunker.r })),
+        baseHoleHeight: gameState.baseHoleHeight,
+        courseSeed: gameState.courseSeed,
+      },
+      ball: {
+        pos: toPlainVec2(ball.pos),
+        vel: toPlainVec2(ball.vel),
+        z: ball.z,
+        vz: ball.vz,
+        club: ball.club,
+        lastSafePos: toPlainVec2(ball.lastSafePos),
+      },
+      storyState: {
+        activeEventId: storyState.activeEvent?.id ?? null,
+        index: storyState.index,
+        seenEventIds: Array.from(storyState.seenEventIds),
+      },
+      summaryState: {
+        visible: summaryState.visible,
+        resultLabel: summaryState.resultLabel,
+        title: summaryState.title,
+        speaker: summaryState.speaker,
+        text: summaryState.text,
+        nextObjective: summaryState.nextObjective,
+        reward: summaryState.reward,
+        goals: summaryState.goals,
+        transition: summaryState.transition,
+        nextAction: summaryState.nextAction,
+        nextActionLabel: summaryState.nextActionLabel,
+      },
+      cityState: {
+        cityId: cityState.cityId,
+        viewId: cityState.viewId,
+        focusedNpcId: cityState.focusedNpcId,
+        primaryAction: cityState.primaryAction,
+        secondaryAction: cityState.secondaryAction,
+      },
+      worldMapState: {
+        mapId: worldMapState.mapId,
+        selectedNodeId: worldMapState.selectedNodeId,
+        primaryAction: worldMapState.primaryAction,
+        secondaryAction: worldMapState.secondaryAction,
+      },
+      competitionState: {
+        activeCompetitionId: competitionState.activeCompetitionId,
+        currentHoleIndex: competitionState.currentHoleIndex,
+      },
+      progressionState: {
+        completedCompetitionIds: Array.from(progressionState.completedCompetitionIds),
+        claimedTourPass: progressionState.claimedTourPass,
+      },
+      cameraFollowBall,
+    };
   }
 
   function getScreenPointer(e) {
@@ -364,7 +1532,10 @@ export function initGame() {
   }
 
   function handlePointerDown(e) {
-    if (gameState.status !== 'aiming') {
+    if (lifecycle.isPaused) {
+      return;
+    }
+    if (gameState.phase !== GAME_PHASES.PLAYING || gameState.status !== 'aiming') {
       return;
     }
     const worldPos = getWorldPointer(e);
@@ -384,6 +1555,9 @@ export function initGame() {
   }
 
   function handlePointerMove(e) {
+    if (lifecycle.isPaused) {
+      return;
+    }
     if (input.isAiming) {
       input.dragCurrent = getWorldPointer(e);
     } else if (input.isPanning) {
@@ -397,6 +1571,11 @@ export function initGame() {
   }
 
   function handlePointerUp() {
+    if (lifecycle.isPaused) {
+      input.isAiming = false;
+      input.isPanning = false;
+      return;
+    }
     if (input.isAiming) {
       input.isAiming = false;
       const dragVector = input.dragStart.sub(input.dragCurrent);
@@ -442,13 +1621,43 @@ export function initGame() {
 
   document.querySelectorAll('.club-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
-      if (gameState.status !== 'aiming') {
+      if (lifecycle.isPaused) {
         return;
       }
-      document.querySelectorAll('.club-btn').forEach((button) => button.classList.remove('active'));
-      e.target.classList.add('active');
-      ball.club = e.target.dataset.club;
+      if (gameState.phase !== GAME_PHASES.PLAYING || gameState.status !== 'aiming') {
+        return;
+      }
+      setSelectedClub(e.target.dataset.club);
     });
+  });
+
+  document.getElementById('guide-next').addEventListener('click', advanceStoryEvent);
+  document.getElementById('guide-skip').addEventListener('click', completeStoryEvent);
+  document.getElementById('summary-next').addEventListener('click', continueFromSummary);
+  document.getElementById('city-primary-action').addEventListener('click', () => runFlowAction(cityState.primaryAction));
+  document.getElementById('city-secondary-action').addEventListener('click', () => runFlowAction(cityState.secondaryAction));
+  document.getElementById('world-map-primary-action').addEventListener('click', () => runFlowAction(worldMapState.primaryAction));
+  document.getElementById('world-map-secondary-action').addEventListener('click', () => runFlowAction(worldMapState.secondaryAction));
+  document.getElementById('city-npc-list').addEventListener('click', (e) => {
+    const npcButton = e.target.closest('[data-npc-id]');
+    if (!npcButton) {
+      return;
+    }
+    focusCityNpc(npcButton.dataset.npcId);
+  });
+  document.getElementById('world-map-node-list').addEventListener('click', (e) => {
+    const nodeButton = e.target.closest('[data-node-id]');
+    if (!nodeButton) {
+      return;
+    }
+    selectWorldMapNode(nodeButton.dataset.nodeId);
+  });
+  document.getElementById('world-map-landmark-layer').addEventListener('click', (e) => {
+    const landmarkButton = e.target.closest('[data-node-id]');
+    if (!landmarkButton) {
+      return;
+    }
+    selectWorldMapNode(landmarkButton.dataset.nodeId);
   });
 
   function autoSelectClub() {
@@ -463,13 +1672,12 @@ export function initGame() {
       clubType = 'iron';
     }
 
-    ball.club = clubType;
-    document.querySelectorAll('.club-btn').forEach((button) => button.classList.remove('active'));
-    document.querySelector(`.club-btn[data-club="${clubType}"]`).classList.add('active');
+    setSelectedClub(clubType);
   }
 
   function shootBall(dir, power) {
     gameState.strokes += 1;
+    recordHoleEvent('shot-taken', { club: ball.club });
     gameState.status = 'moving';
     cameraFollowBall = true;
     updateUI();
@@ -513,17 +1721,7 @@ export function initGame() {
         const terrainType = getTerrainAt(ball.pos.x, ball.pos.y).type;
 
         if (terrainType === TERRAIN.WATER) {
-          gameState.status = 'penalty';
-          showMessage('Water Penalty');
-          gameState.strokes += 1;
-          setTimeout(() => {
-            ball.pos = new Vec2(ball.lastSafePos.x, ball.lastSafePos.y);
-            ball.vel = new Vec2(0, 0);
-            ball.z = 0;
-            ball.vz = 0;
-            gameState.status = 'aiming';
-            updateUI();
-          }, 2000);
+          recoverFromPenalty('Water Penalty');
           return;
         }
 
@@ -551,19 +1749,7 @@ export function initGame() {
       if (distToHole < CONSTANTS.HOLE_RADIUS && ball.vel.mag() < 6) {
         ball.pos = new Vec2(gameState.holePos.x, gameState.holePos.y);
         ball.vel = new Vec2(0, 0);
-        gameState.status = 'holed';
-
-        const score = gameState.strokes - gameState.par;
-        let term = score <= -3 ? 'Albatross' : score === -2 ? 'Eagle' : score === -1 ? 'Birdie' : score === 0 ? 'Par' : score === 1 ? 'Bogey' : `+${score}`;
-        if (gameState.strokes === 1) {
-          term = 'Hole in One!';
-        }
-        showMessage(term);
-
-        setTimeout(() => {
-          gameState.hole += 1;
-          generateCourse();
-        }, 3500);
+        finishHole();
         return;
       }
 
@@ -573,23 +1759,15 @@ export function initGame() {
         if (terrain.type !== TERRAIN.WATER) {
           ball.lastSafePos = new Vec2(ball.pos.x, ball.pos.y);
         }
+        recordHoleEvent('shot-settled', { terrainKey: getTerrainKey(terrain.type) });
         autoSelectClub();
         updateUI();
+        triggerStoryEvent('shot-settled');
       }
     }
 
     if (ball.pos.x < 0 || ball.pos.x > CONSTANTS.MAP_WIDTH || ball.pos.y < 0 || ball.pos.y > CONSTANTS.MAP_HEIGHT) {
-      gameState.status = 'penalty';
-      showMessage('Out of Bounds');
-      gameState.strokes += 1;
-      setTimeout(() => {
-        ball.pos = new Vec2(ball.lastSafePos.x, ball.lastSafePos.y);
-        ball.vel = new Vec2(0, 0);
-        ball.z = 0;
-        ball.vz = 0;
-        gameState.status = 'aiming';
-        updateUI();
-      }, 2000);
+      recoverFromPenalty('Out of Bounds');
     }
   }
 
@@ -642,11 +1820,13 @@ export function initGame() {
   }
 
   function renderLoop() {
-    updatePhysics();
-    updateCamera();
+    if (!lifecycle.isPaused) {
+      updatePhysics();
+      updateCamera();
+    }
     updateTargetIndicator();
 
-    if (Math.random() < 0.1 * gameState.wind.mag()) {
+    if (!lifecycle.isPaused && Math.random() < 0.1 * gameState.wind.mag()) {
       particles.push({
         pos: new Vec2(gameState.camera.x + (gameState.wind.x < 0 ? fgCanvas.width + 100 : -100), gameState.camera.y + Math.random() * fgCanvas.height),
         life: 150 + Math.random() * 50,
@@ -742,6 +1922,15 @@ export function initGame() {
     document.getElementById('wind-arrow').style.transform = `rotate(${(Math.atan2(gameState.wind.y, gameState.wind.x) * 180) / Math.PI + 90}deg)`;
   }
 
-  generateCourse();
+  if (autoStart) {
+    generateCourse();
+  }
   requestAnimationFrame(renderLoop);
+
+  return {
+    startNewGame,
+    saveState,
+    loadState: restoreGame,
+    setPaused,
+  };
 }

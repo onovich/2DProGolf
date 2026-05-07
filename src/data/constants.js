@@ -10,6 +10,37 @@ export const CONSTANTS = {
   WATER_LEVEL: 15,
 };
 
+export const COURSE_CONFIG = {
+  START_X: 300,
+  TEE_Y_JITTER: 600,
+  ANGLE_RANGE: Math.PI * 0.15,
+  HOLE_HEIGHT_BUFFER: 10,
+  PAR_THRESHOLDS: {
+    par3Max: 1300,
+    par4Max: 1900,
+  },
+  HOLE_DISTANCE: {
+    base: 900,
+    perHole: 150,
+    variance: 300,
+  },
+  WIND: {
+    min: 0,
+    max: 10,
+    mode: 'random',
+    jitter: 0.25,
+  },
+  BUNKER: {
+    base: 8,
+    perHole: 2,
+    offsetRange: 400,
+    radius: {
+      min: 25,
+      max: 65,
+    },
+  },
+};
+
 export const TERRAIN = {
   GREEN: { friction: 0.98, colorBase: [144, 214, 110] },
   FAIRWAY: { friction: 0.96, colorBase: [93, 179, 83] },
