@@ -19,7 +19,6 @@ const elements = {
 	systemMenu: document.getElementById('system-menu'),
 	systemSaveStatus: document.getElementById('system-save-status'),
 	titleNewGame: document.getElementById('title-new-game'),
-	titleSaveGame: document.getElementById('title-save-game'),
 	titleLoadGame: document.getElementById('title-load-game'),
 	openSystemMenu: document.getElementById('open-system-menu'),
 	menuResume: document.getElementById('menu-resume-game'),
@@ -108,7 +107,6 @@ function updateSaveLabels() {
 		? `最近一次写入：${formatSaveTime(saveSlot.savedAt)}`
 		: '当前没有可读取的本地存档。';
 
-	elements.titleSaveGame.disabled = !uiState.hasLiveSession;
 	elements.menuSave.disabled = !uiState.hasLiveSession;
 	elements.titleLoadGame.disabled = !saveSlot;
 	elements.menuLoad.disabled = !saveSlot;
@@ -175,7 +173,6 @@ function returnToTitle() {
 }
 
 elements.titleNewGame.addEventListener('click', startNewGame);
-elements.titleSaveGame.addEventListener('click', writeSaveSlot);
 elements.titleLoadGame.addEventListener('click', loadSavedGame);
 elements.openSystemMenu.addEventListener('click', () => {
 	if (!uiState.hasLiveSession) {

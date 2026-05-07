@@ -14,7 +14,6 @@ export function renderAppShell() {
       <h1 class="title-heading">2D Pro Golf</h1>
       <div class="shell-action-stack">
         <button id="title-new-game" class="shell-action shell-action-primary" type="button">新游戏</button>
-        <button id="title-save-game" class="shell-action" type="button">存档</button>
         <button id="title-load-game" class="shell-action" type="button">读档</button>
       </div>
     </section>
