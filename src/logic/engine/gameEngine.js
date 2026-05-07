@@ -312,6 +312,10 @@ export function initGame(options = {}) {
     updateWorldMapPanel();
   }
 
+  function canAcceptShotInput() {
+    return !lifecycle.isPaused && !storyState.activeEvent && gameState.phase === GAME_PHASES.PLAYING && gameState.status === 'aiming';
+  }
+
   function updateGuidePanel() {
     const panel = document.getElementById('guide-panel');
     const speaker = document.getElementById('guide-speaker');
@@ -1059,6 +1063,8 @@ export function initGame(options = {}) {
   }
 
   function startStoryEvent(event) {
+    input.isAiming = false;
+    input.isPanning = false;
     storyState.activeEvent = event;
     storyState.index = 0;
     setGamePhase(event.phase ?? GAME_PHASES.INTRO);
@@ -1532,10 +1538,7 @@ export function initGame(options = {}) {
   }
 
   function handlePointerDown(e) {
-    if (lifecycle.isPaused) {
-      return;
-    }
-    if (gameState.phase !== GAME_PHASES.PLAYING || gameState.status !== 'aiming') {
+    if (!canAcceptShotInput()) {
       return;
     }
     const worldPos = getWorldPointer(e);
@@ -1578,6 +1581,10 @@ export function initGame(options = {}) {
     }
     if (input.isAiming) {
       input.isAiming = false;
+      if (!canAcceptShotInput()) {
+        input.isPanning = false;
+        return;
+      }
       const dragVector = input.dragStart.sub(input.dragCurrent);
       const power = dragVector.mag() * 0.12;
       if (power > 1) {
@@ -1621,10 +1628,7 @@ export function initGame(options = {}) {
 
   document.querySelectorAll('.club-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
-      if (lifecycle.isPaused) {
-        return;
-      }
-      if (gameState.phase !== GAME_PHASES.PLAYING || gameState.status !== 'aiming') {
+      if (!canAcceptShotInput()) {
         return;
       }
       setSelectedClub(e.target.dataset.club);
